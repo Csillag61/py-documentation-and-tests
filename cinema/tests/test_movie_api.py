@@ -1,12 +1,162 @@
 import tempfile
 import os
+import json
+import yaml
 from PIL import Image
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.settings import api_settings
 from cinema.models import Movie, MovieSession, CinemaHall, Genre, Actor
+from unittest import skip
+
+
+class TestMovieViewSetCore(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            "user2@myproject.com", "password"
+        )
+        self.admin = get_user_model().objects.create_superuser(
+            "admin2@myproject.com", "password"
+        )
+        self.genre = sample_genre(name="Drama")
+        self.actor = sample_actor(first_name="Jane", last_name="Doe")
+        self.movie = sample_movie(
+            title="Test Movie", genres=[self.genre], actors=[self.actor]
+        )
+
+    def authenticate(self, user=None):
+        if user is None:
+            user = self.user
+        self.client.force_authenticate(user)
+
+    def get_jwt_token(self, user=None):
+        if user is None:
+            user = self.user
+        refresh = RefreshToken.for_user(user)
+        return str(refresh.access_token)
+
+    def test_retrieve_movie_detail(self):
+        self.authenticate()
+        url = reverse("cinema:movie-detail", args=[self.movie.id])
+        res = self.client.get(url)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["id"], self.movie.id)
+
+    def test_create_movie_admin_only(self):
+        # Unauthenticated
+        data = {
+            "title": "New Movie",
+            "description": "desc",
+            "duration": 120,
+            "genres": [self.genre.id],
+            "actors": [self.actor.id],
+        }
+        res = self.client.post(MOVIE_URL, data)
+        self.assertEqual(res.status_code, 401)
+        # Authenticated, not admin
+        self.authenticate(self.user)
+        res = self.client.post(MOVIE_URL, data)
+        self.assertEqual(res.status_code, 403)
+        # Admin
+        self.authenticate(self.admin)
+        res = self.client.post(MOVIE_URL, data)
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["title"], "New Movie")
+
+    def test_update_movie_admin_only(self):
+        url = reverse("cinema:movie-detail", args=[self.movie.id])
+        patch_data = {"title": "Updated Title"}
+        # Unauthenticated
+        res = self.client.patch(url, patch_data)
+        self.assertEqual(res.status_code, 401)
+        # Authenticated, not admin
+        self.authenticate(self.user)
+        res = self.client.patch(url, patch_data)
+        self.assertEqual(res.status_code, 403)
+        # Admin
+        self.authenticate(self.admin)
+        res = self.client.patch(url, patch_data)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["title"], "Updated Title")
+
+    def test_delete_movie_admin_only(self):
+        url = reverse("cinema:movie-detail", args=[self.movie.id])
+        # Unauthenticated
+        res = self.client.delete(url)
+        self.assertEqual(res.status_code, 401)
+        # Authenticated, not admin
+        self.authenticate(self.user)
+        res = self.client.delete(url)
+        self.assertEqual(res.status_code, 403)
+        # Admin
+        self.authenticate(self.admin)
+        res = self.client.delete(url)
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(Movie.objects.filter(id=self.movie.id).exists())
+
+    @skip(
+        "DRF test client does not enforce throttling; "
+        "test only in integration or with real cache."
+    )
+    @override_settings(
+        REST_FRAMEWORK={
+            "DEFAULT_THROTTLE_CLASSES": [
+                "rest_framework.throttling.UserRateThrottle",
+                "rest_framework.throttling.AnonRateThrottle",
+            ],
+            "DEFAULT_THROTTLE_RATES": {"user": "2/minute", "anon": "2/minute"},
+        }
+    )
+    def test_throttling(self):
+        # Authenticated user
+        self.authenticate(self.user)
+        for _ in range(2):
+            res = self.client.get(MOVIE_URL)
+            self.assertNotEqual(res.status_code, 429)
+        res = self.client.get(MOVIE_URL)
+        self.assertEqual(res.status_code, 429)
+
+        self.client.logout()
+        for _ in range(2):
+            res = self.client.get(MOVIE_URL)
+            self.assertNotEqual(res.status_code, 429)
+        res = self.client.get(MOVIE_URL)
+        self.assertEqual(res.status_code, 429)
+
+
+class TestMovieOpenAPISchema(TestCase):
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = get_user_model().objects.create_superuser(
+            "admin3@myproject.com", "password"
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_movie_list_schema_has_filter_params(self):
+        res = self.client.get("/api/schema/")
+        self.assertEqual(res.status_code, 200)
+        schema = yaml.safe_load(res.content)
+        # Find /api/cinema/movies/ GET operation
+        paths = schema.get("paths", {})
+        movie_list = None
+        for path, ops in paths.items():
+            if path.endswith("/api/cinema/movies/") and "get" in ops:
+                movie_list = ops["get"]
+                break
+        self.assertIsNotNone(movie_list)
+        params = {p["name"]: p for p in movie_list.get("parameters", [])}
+        self.assertIn("title", params)
+        self.assertIn("genres", params)
+        self.assertIn("actors", params)
+        self.assertEqual(params["title"]["in"], "query")
+        self.assertEqual(params["genres"]["in"], "query")
+        self.assertEqual(params["actors"]["in"], "query")
 
 
 class TestMovieViewSetFilter(TestCase):
@@ -20,12 +170,12 @@ class TestMovieViewSetFilter(TestCase):
         self.genre2 = sample_genre(name="Comedy")
         self.actor1 = sample_actor(first_name="Tom", last_name="Hanks")
         self.actor2 = sample_actor(first_name="Brad", last_name="Pitt")
-        self.movie1 = sample_movie(title="Funny Movie", genres=[self.genre2])
-        self.movie1.genres.add(self.genre2)
-        self.movie1.actors.add(self.actor1)
-        self.movie2 = sample_movie(title="Action Movie", genres=[self.genre1])
-        self.movie2.genres.add(self.genre1)
-        self.movie2.actors.add(self.actor2)
+        self.movie1 = sample_movie(
+            title="Funny Movie", genres=[self.genre2], actors=[self.actor1]
+        )
+        self.movie2 = sample_movie(
+            title="Action Movie", genres=[self.genre1], actors=[self.actor2]
+        )
 
     def test_filter_movies_by_title(self):
         res = self.client.get(MOVIE_URL, {"title": "Funny"})
