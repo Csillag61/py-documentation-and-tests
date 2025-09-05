@@ -1,15 +1,68 @@
 import tempfile
 import os
-
 from PIL import Image
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
-
 from rest_framework.test import APIClient
 from rest_framework import status
-
 from cinema.models import Movie, MovieSession, CinemaHall, Genre, Actor
+
+
+class TestMovieViewSetFilter(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user(
+            "user@myproject.com", "password"
+        )
+        self.client.force_authenticate(self.user)
+        self.genre1 = sample_genre(name="Action")
+        self.genre2 = sample_genre(name="Comedy")
+        self.actor1 = sample_actor(first_name="Tom", last_name="Hanks")
+        self.actor2 = sample_actor(first_name="Brad", last_name="Pitt")
+        self.movie1 = sample_movie(title="Funny Movie", genres=[self.genre2])
+        self.movie1.genres.add(self.genre2)
+        self.movie1.actors.add(self.actor1)
+        self.movie2 = sample_movie(title="Action Movie", genres=[self.genre1])
+        self.movie2.genres.add(self.genre1)
+        self.movie2.actors.add(self.actor2)
+
+    def test_filter_movies_by_title(self):
+        res = self.client.get(MOVIE_URL, {"title": "Funny"})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["title"], "Funny Movie")
+
+    def test_filter_movies_by_genres(self):
+        res = self.client.get(MOVIE_URL, {"genres": str(self.genre1.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["title"], "Action Movie")
+        self.assertEqual(data[0]["title"], "Action Movie")
+
+    def test_filter_movies_by_actors(self):
+        res = self.client.get(MOVIE_URL, {"actors": str(self.actor2.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["title"], "Action Movie")
+
+    def test_filter_movies_by_multiple_actors(self):
+        ids = f"{self.actor1.id},{self.actor2.id}"
+        res = self.client.get(MOVIE_URL, {"actors": ids})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.json()
+        self.assertEqual(len(data), 2)
+        self.assertEqual(len(res.json()), 2)
+
+    def test_filter_movies_by_multiple_genres(self):
+        ids = f"{self.genre1.id},{self.genre2.id}"
+        res = self.client.get(MOVIE_URL, {"genres": ids})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data), 2)
+
 
 MOVIE_URL = reverse("cinema:movie-list")
 MOVIE_SESSION_URL = reverse("cinema:moviesession-list")
@@ -21,9 +74,15 @@ def sample_movie(**params):
         "description": "Sample description",
         "duration": 90,
     }
+    genres = params.pop("genres", None)
+    actors = params.pop("actors", None)
     defaults.update(params)
-
-    return Movie.objects.create(**defaults)
+    movie = Movie.objects.create(**defaults)
+    if genres is not None:
+        movie.genres.set(genres)
+    if actors is not None:
+        movie.actors.set(actors)
+    return movie
 
 
 def sample_genre(**params):
@@ -47,8 +106,13 @@ def sample_movie_session(**params):
         name="Blue", rows=20, seats_in_row=20
     )
 
+    from django.utils import timezone
+    import datetime
+
     defaults = {
-        "show_time": "2022-06-02 14:00:00",
+        "show_time": timezone.make_aware(
+            datetime.datetime(2022, 6, 2, 14, 0, 0)
+        ),
         "movie": None,
         "cinema_hall": cinema_hall,
     }
@@ -66,7 +130,7 @@ def detail_url(movie_id):
     return reverse("cinema:movie-detail", args=[movie_id])
 
 
-class MovieImageUploadTests(TestCase):
+class TestMovieImageUpload(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user = get_user_model().objects.create_superuser(
@@ -92,7 +156,7 @@ class MovieImageUploadTests(TestCase):
         self.movie.refresh_from_db()
 
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertIn("image", res.data)
+        self.assertIn("image", res.json())
         self.assertTrue(os.path.exists(self.movie.image.path))
 
     def test_upload_image_bad_request(self):
@@ -134,7 +198,7 @@ class MovieImageUploadTests(TestCase):
             self.client.post(url, {"image": ntf}, format="multipart")
         res = self.client.get(detail_url(self.movie.id))
 
-        self.assertIn("image", res.data)
+        self.assertIn("image", res.json())
 
     def test_image_url_is_shown_on_movie_list(self):
         url = image_upload_url(self.movie.id)
@@ -145,7 +209,7 @@ class MovieImageUploadTests(TestCase):
             self.client.post(url, {"image": ntf}, format="multipart")
         res = self.client.get(MOVIE_URL)
 
-        self.assertIn("image", res.data[0].keys())
+        self.assertIn("image", res.json()[0].keys())
 
     def test_image_url_is_shown_on_movie_session_detail(self):
         url = image_upload_url(self.movie.id)
@@ -156,4 +220,5 @@ class MovieImageUploadTests(TestCase):
             self.client.post(url, {"image": ntf}, format="multipart")
         res = self.client.get(MOVIE_SESSION_URL)
 
-        self.assertIn("movie_image", res.data[0].keys())
+        data = res.json()
+        self.assertIn("movie_image", data[0].keys())

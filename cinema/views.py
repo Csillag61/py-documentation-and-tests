@@ -77,6 +77,34 @@ class MovieViewSet(
         """Converts a list of string IDs to a list of integers"""
         return [int(str_id) for str_id in qs.split(",")]
 
+    from drf_spectacular.utils import extend_schema, OpenApiParameter
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="title",
+                type=str,
+                location=OpenApiParameter.QUERY,
+                description="Filter movies by partial title match.",
+            ),
+            OpenApiParameter(
+                name="genres",
+                type={"type": "list", "items": {"type": "integer"}},
+                location=OpenApiParameter.QUERY,
+                description=(
+                    "Comma-separated list of genre IDs to filter movies."
+                ),
+            ),
+            OpenApiParameter(
+                name="actors",
+                type={"type": "list", "items": {"type": "integer"}},
+                location=OpenApiParameter.QUERY,
+                description=(
+                    "Comma-separated list of actor IDs to filter movies."
+                ),
+            ),
+        ]
+    )
     def get_queryset(self):
         """Retrieve the movies with filters"""
         title = self.request.query_params.get("title")
@@ -143,6 +171,24 @@ class MovieSessionViewSet(viewsets.ModelViewSet):
     authentication_classes = (TokenAuthentication,)
     permission_classes = (IsAdminOrIfAuthenticatedReadOnly,)
 
+    from drf_spectacular.utils import extend_schema, OpenApiParameter
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="date",
+                type=str,
+                location=OpenApiParameter.QUERY,
+                description="Filter movie sessions by date (YYYY-MM-DD).",
+            ),
+            OpenApiParameter(
+                name="movie",
+                type=int,
+                location=OpenApiParameter.QUERY,
+                description="Filter movie sessions by movie ID.",
+            ),
+        ]
+    )
     def get_queryset(self):
         date = self.request.query_params.get("date")
         movie_id_str = self.request.query_params.get("movie")
